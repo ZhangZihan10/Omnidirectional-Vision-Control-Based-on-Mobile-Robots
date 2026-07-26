@@ -1,0 +1,2 @@
+imageData = screencapture(0,  [1635,-360,440,360]);  % c
+imshow(imageData);

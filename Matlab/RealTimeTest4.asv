@@ -1,0 +1,217 @@
+%可以根据实时障碍物监测重新规划路线
+
+clear;
+% 初始化客户端连接
+name = "Matlab";
+Client = TCPInit('127.0.0.1',55012,name);
+% 加载相机模型
+load('Omni_Calib_Results_Unity.mat'); 
+ocam_model = calib_data.ocam_model;
+
+cvsyst_rot = 0;      % 如果坐标系无旋转
+
+camY = 0;          % Camera parameters 为x旋转
+camX = 0;          % Camera parameters 为z旋转
+camZ = 0;          % Camera parameters 为y旋转
+
+lasY = 0.0;          % 激光器绕 Y 轴旋转
+lasX = 0.0;          % 激光器绕 X 轴旋转
+
+
+robot_trace = [];  % 实时保存机器人当前位置轨迹
+
+% --- 预取一帧图像，初始化图像句柄 ---
+black_image = ImageReadTCP_One(Client, 'Center');
+%binaryImage = LaserFindRealtime(black_image);
+binaryImage = las_segm1(black_image);
+% 第一次绘图，创建句柄
+figure;
+% 第一次绘图，创建句柄
+f1 = subplot(1,4,1); h1 = imshow(black_image); title('Original Image');
+f2 = subplot(1,4,2); h2 = imshow(binaryImage); title('Laser Extraction');
+f3 = subplot(1,4,3);
+h3 = scatter([], [], 5, 'filled'); hold on;
+
+% 固定坐标轴范围
+xlim([-10000, 15000]);  %相机坐标系下定位 单位/100 mm
+ylim([-10000, 15000]);
+%xlim([-10, 40]);  %机器人坐标系下定位 单位cm
+%ylim([-10, 40]);
+%h4 = plot(0, 0, 'r*'); % 保留红点绘图句柄
+title('Ranging Results'); xlabel('X/cm'); ylabel('Y/cm'); grid on;
+x = 0; y = 0; las_dist = 1850; % 激光面参数
+
+f4 = subplot(1,4,4);
+h4 = scatter([], [], 5, 'filled'); hold on;
+% 固定坐标轴范围
+xlim([-10000, 15000]);  %机器人坐标系下定位 单位cm
+ylim([-10000, 15000]);
+%h4 = plot(0, 0, 'r*'); % 保留红点绘图句柄
+title('Word Ranging Results'); xlabel('X/cm'); ylabel('Y/cm'); grid on;
+
+figure;
+h5 = scatter([], [], 5, 'filled'); hold on;
+h_trace = plot(nan, nan, 'g-', 'LineWidth', 1.5);  % 初始化轨迹线
+title('Real Path'); xlabel('X/cm'); ylabel('Y/cm'); grid on;
+
+b=1;
+
+
+% 输入障碍物轮廓和初始点、目标点
+%load('pot.mat'); % 加载障碍物轮廓数据，假设存储为二维坐标集 [x, y]
+start_point = [0, 0];% A点，起始点
+goal_point = [4000, 8000];%Unity中实际的y坐标与鱼眼相机的y坐标相反% B点，目标点
+
+%初始相机原点
+cvsyst_y = start_point(1,2);        % 相机坐标系 y 偏移
+cvsyst_x = start_point(1,1);        % 相机坐标系 x 偏移
+
+%通过鱼眼摄像头计算障碍物的位置
+%计算全局下障碍物位置
+[x2, y2] = mapping(binaryImage, cvsyst_rot, cvsyst_x, cvsyst_y, ...
+                  camY, camX, camZ, lasY, lasX, las_dist, ocam_model);
+
+ if size(x2,2)>1
+        x2(:,1) = [];  % 删除第一列
+        y2(:,1) = [];  % 删除第一列
+ end  
+
+xy2 = [x2(:), y2(:)];
+
+safety_distance=1000;
+%y坐标与Unity实际坐标相反，所以重新设置
+%start_point2 = [start_point(1,1), -start_point(1,2)];% A点，起始点
+%goal_point2 = [goal_point(1,1), -goal_point(1,2)];%Unity中实际的y坐标与鱼眼相机的y坐标相反% B点，目标点
+% 基于RRT的路径规划
+%path = rrt_path_planning(start_point, goal_point, pot/100,safety_distance);
+path =rrt_star_path_planning(start_point, goal_point, xy2,safety_distance);
+% 路径优化
+smoothed_path = smooth_path(path);
+
+% 可视化障碍物
+figure;
+scatter(xy2(:,1), xy2(:,2), 'filled',"red"); hold on;
+plot(start_point(1), start_point(2), 'go', 'MarkerSize', 10, 'LineWidth', 2); % 起点
+plot(goal_point(1), goal_point(2), 'bo', 'MarkerSize', 10, 'LineWidth', 2); % 终点
+axis equal;
+xlabel('X/m');
+ylabel('Y/m');
+%title('障碍物及路径规划');
+title('Obstacle and Path Planning');
+
+% 路径执行并可视化
+plot(smoothed_path(:,1), smoothed_path(:,2), 'black-', 'LineWidth', 2); % 绘制优化路径
+hold off;
+
+q=smoothed_path;
+
+cvsyst_y = q(b,2);        % 相机坐标系 y 偏移
+cvsyst_x = q(b,1);        % 相机坐标系 x 偏移
+
+% 图像采集 + 实时处理循环
+while true
+
+    
+    try
+        % Step 1: 等待有效图像生成
+        timeout = 2; tic;
+        while true
+            if exist('image.png', 'file') == 2
+                file_info = dir('image.png');
+                if file_info.bytes > 1000 % 避免读取空图
+                    break;
+                end
+            end
+            if toc > timeout
+                warning('图像等待超时，跳过本帧。');
+                continue;
+            end
+            pause(0.01);
+        end
+    
+    current_position=q(b,:);
+    
+
+    %检测当前路径是否与障碍物发生碰撞
+    if check_path_collision(smoothed_path, xy2, safety_distance)
+    disp('路径与新障碍物冲突，重新规划路径...');
+    path = rrt_star_path_planning(current_position, goal_point, xy2, safety_distance);
+    smoothed_path = smooth_path(path);
+    q = smoothed_path;
+    b = 1; % 重新从新路径起点执行
+    end
+
+    robot_trace = [robot_trace; current_position];
+    % --- Step 2: 激光提取处理 ---
+    %（可以封装为函数 processLaserImage(image)，返回 cleaned binaryImage）
+    %binaryImage = LaserFindRealtime(black_image);
+    binaryImage = las_segm1(black_image);
+    %imshow(binaryImage);
+
+    % --- Step 3: Mapping & 坐标提取 ---
+    %计算与机器人的距离信息
+    [x1, y1] = mapping(binaryImage, cvsyst_rot, 0, 0, ...
+                  camY, camX, camZ, lasY, lasX, las_dist, ocam_model);
+    if size(x1,2)>1
+        x1(:,1) = [];  % 删除第一列
+        y1(:,1) = [];  % 删除第一列
+    end
+
+    xy = [x1(:), y1(:)];
+    %计算全局下障碍物位置
+    [x2, y2] = mapping(binaryImage, cvsyst_rot, cvsyst_x, cvsyst_y, ...
+                  camY, camX, camZ, lasY, lasX, las_dist, ocam_model);
+    if size(x2,2)>1
+        x2(:,1) = [];  % 删除第一列
+        y2(:,1) = [];  % 删除第一列
+    end  
+
+    xy2 = [x2(:), y2(:)];
+    
+    %xy(1,:) = [];  % 删除第一行
+    %[potNew,xt1,yt1] = MappingRobot(xy,450);
+    %[C_Up] = cube_dist(binaryImage,[1;1850],[1;1850],x,y,las_dist,ocam_model);
+    %[potNew,xt1,yt1] = MappingRobot(C_Up,450);
+
+    
+    % Step 4: 更新图像内容
+    set(h1, 'CData', black_image);
+    set(h2, 'CData', binaryImage);
+    %set(h3, 'XData', xt1, 'YData', yt1);
+    set(h3, 'XData', x1, 'YData', y1);
+    set(h4, 'XData', x2, 'YData', y2);
+    %set(h4, 'XData', potNew(1), 'YData', potNew(2));
+    set(h_trace, 'XData', robot_trace(:,1), 'YData', robot_trace(:,2));
+    %if ~isempty(potNew)
+        % 如果有有效的机器人位置，则更新红点
+    %    h4 = plot(potNew(1), potNew(2), 'r*');
+    %end
+
+    drawnow limitrate; % 提升性能
+
+
+    %控制机器人运动
+    if b<=size(q,1)
+    func_Car(Client, q, b);
+    %记录当前机器人位置
+    cvsyst_y = q(b,2);        % 相机坐标系 y 偏移
+    cvsyst_x = q(b,1);        % 相机坐标系 x 偏移
+
+    b=b+1;
+    end
+
+
+    image = ImageReadTCP_One(Client, 'Center'); % 获取图像
+    black_image = image;
+ 
+    catch ME
+        warning('发生错误：%s，跳过本帧。', char(ME.message));
+        continue;
+    end
+
+   
+    %print(b);
+    
+     
+    
+end
