@@ -13,6 +13,9 @@ The proposed system integrates:
 
 The framework establishes a complete **perception–mapping–planning–control–feedback** pipeline for autonomous mobile robot navigation.
 
+<img src="./1.png" width="400">
+
+Application Performance of the Proposed Method on the Real Platform：
 
 <img src="./IMG_0699.gif" width="300">
 ---
